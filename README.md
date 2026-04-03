@@ -228,7 +228,6 @@ If a feed still fails, try:
 - No background refresh daemon
 - No OPML export or import yet
 - Feed recovery from websites depends on the site exposing a detectable RSS or Atom link
-- The Linux configuration path still uses `podcastmanager` for compatibility, even though the program name is now Riscy-PodMan
 
 ## Example workflow
 
