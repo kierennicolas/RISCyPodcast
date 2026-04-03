@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="1400" height="320" viewBox="0 0 1400 320" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">RISCy PodMan logo</title>
+  <desc id="desc">A clean three-colour vector logo for RISCy PodMan with a retro-tech podcast icon, single-line wordmark, and two-tone underline.</desc>
+
+  <defs>
+    <style>
+      .blue { fill: #005EB8; }
+      .black { fill: #111111; }
+      .white { fill: #FFFFFF; }
+      .wordA { font-family: Arial, Helvetica, sans-serif; font-weight: 800; font-size: 102px; }
+      .wordB { font-family: Arial, Helvetica, sans-serif; font-weight: 800; font-size: 102px; }
+    </style>
+  </defs>
+
+  <!-- Icon -->
+  <g transform="translate(34,22)">
+    <rect class="black" x="24" y="24" width="208" height="208" rx="34"/>
+    <rect class="blue" x="0" y="0" width="208" height="208" rx="34"/>
+
+    <!-- Podcast glyph -->
+    <path class="white" d="M104 42
+                           C64 42 31 75 31 115
+                           L51 115
+                           C51 86 75 62 104 62
+                           C133 62 157 86 157 115
+                           L177 115
+                           C177 75 144 42 104 42Z"/>
+    <path class="white" d="M104 72
+                           C80 72 61 91 61 115
+                           L81 115
+                           C81 102 91 92 104 92
+                           C117 92 127 102 127 115
+                           L147 115
+                           C147 91 128 72 104 72Z"/>
+    <circle class="white" cx="104" cy="118" r="16"/>
+    <rect class="white" x="84" y="146" width="40" height="58" rx="20"/>
+  </g>
+
+  <!-- Wordmark -->
+  <g transform="translate(300,153)">
+    <text class="wordA black" x="0" y="0">RISCy</text>
+    <text class="wordB blue" x="355" y="0">PodMan</text>
+
+    <!-- Two-tone underline -->
+    <rect class="blue" x="4" y="34" width="420" height="14" rx="7"/>
+    <rect class="black" x="424" y="34" width="470" height="14" rx="7"/>
+  </g>
+</svg>
