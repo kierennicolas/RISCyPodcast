@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║   Riscy-PodMan  v1.1                                             ║
+║              Riscy-PodMan  v1.3                               ║
 ║   Terminal podcast manager for RISC OS & Linux                   ║
 ║   Standard library only — no pip packages required               ║
 ╚══════════════════════════════════════════════════════════════════╝
@@ -57,8 +57,8 @@ IS_POSIX  = (os.name == 'posix') and not IS_RISCOS
 #  CONSTANTS
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-VERSION              = "1.2"
-APP_NAME             = "PodcastManager"
+VERSION              = "1.3"
+APP_NAME             = "RiscyPodMan"
 SCREEN_W             = 78
 
 # Separator lines (ASCII-safe for RISC OS VDU)
@@ -70,8 +70,10 @@ DEFAULT_RATE_DELAY   = 2.0   # seconds between requests to same host
 DEFAULT_TIMEOUT      = 30    # HTTP connect/read timeout
 DEFAULT_MAX_EP       = 100   # max episodes stored per feed
 CHUNK_SIZE           = 8192  # download chunk bytes
+FEED_CHUNK_SIZE      = 4096  # feed XML read chunk bytes
+DEFAULT_MAX_FEED_MB  = 25    # default maximum feed XML size in MB
 
-USER_AGENT           = ("PodcastManager/{} Python/{}.{}"
+USER_AGENT           = ("Riscy-PodMan/{} Python/{}.{}"
                         .format(VERSION, *sys.version_info[:2]))
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -176,7 +178,12 @@ def clrscr():
 
 
 def now_iso():
-    return datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+    return datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+
+def sha256_hex(data):
+    """Return SHA-256 hex digest for bytes."""
+    return hashlib.sha256(data).hexdigest()
 
 
 def date_display(iso):
@@ -228,7 +235,8 @@ def parse_retry_after(value, default=60):
         pass
     try:
         dt = datetime.datetime.strptime(value, '%a, %d %b %Y %H:%M:%S GMT')
-        return max(0, int((dt - datetime.datetime.utcnow()).total_seconds()))
+        now_utc = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+        return max(0, int((dt - now_utc).total_seconds()))
     except (TypeError, ValueError):
         return default
 
@@ -237,6 +245,27 @@ def allowed_remote_url(url):
     """Return True only for http(s) URLs."""
     scheme = urllib.parse.urlparse(url).scheme.lower()
     return scheme in ('http', 'https')
+
+
+def read_response_bytes(resp, max_bytes=None, label='feed'):
+    """Read a response body in chunks with a size cap and hard deadline."""
+    timeout = int(cfg('http_timeout'))
+    if max_bytes is None:
+        max_bytes = int(cfg('max_feed_mb')) * 1024 * 1024
+    deadline = time.time() + max(15, timeout * 2)
+    chunks = []
+    total = 0
+    while True:
+        if time.time() > deadline:
+            raise IOError('{} read timed out after {}s'.format(label, max(15, timeout * 2)))
+        chunk = resp.read(FEED_CHUNK_SIZE)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > max_bytes:
+            raise IOError('{} exceeds {} bytes (raise max_feed_mb in Settings if needed)'.format(label, max_bytes))
+    return b''.join(chunks)
 
 
 def safe_tmp_path(dest):
@@ -426,6 +455,7 @@ _DEFAULTS = {
     'http_timeout':          DEFAULT_TIMEOUT,
     'max_episodes_per_feed': DEFAULT_MAX_EP,
     'auto_refresh_on_start': True,
+    'max_feed_mb': DEFAULT_MAX_FEED_MB,
 }
 
 _cfg = {}
@@ -610,19 +640,22 @@ def http_get(url, max_retries=3):
 
 
 
-def http_open_stream(url, max_retries=3):
+def http_open_stream(url, max_retries=3, extra_headers=None):
     """Open a URL for streaming download with the same retry logic as feeds."""
     if not allowed_remote_url(url):
         return None, 'Only http:// and https:// URLs are supported.'
 
     timeout = int(cfg('http_timeout'))
     current_url = url
+    extra_headers = extra_headers or {}
 
     for attempt in range(max_retries):
         _rate_wait(current_url)
         req = urllib.request.Request(current_url)
         req.add_header('User-Agent', USER_AGENT)
         req.add_header('Accept', '*/*')
+        for key, value in extra_headers.items():
+            req.add_header(key, value)
         try:
             resp = _opener.open(req, timeout=timeout)
             _last_req[urllib.parse.urlparse(current_url).netloc] = time.time()
@@ -656,6 +689,375 @@ def http_open_stream(url, max_retries=3):
             return None, str(e)
 
     return None, 'Max retries ({}) exceeded'.format(max_retries)
+
+
+def _iter_opml_outlines(elem):
+    """Yield all OPML <outline> elements recursively."""
+    for child in list(elem):
+        tag = child.tag.lower() if hasattr(child.tag, 'lower') else ''
+        if tag.endswith('outline'):
+            yield child
+        for sub in _iter_opml_outlines(child):
+            yield sub
+
+
+def search_gpodder(query, limit=30):
+    """Search gpodder.net and return a list of podcast feed candidates."""
+    query = (query or '').strip()
+    if not query:
+        return []
+
+    quoted = urllib.parse.quote(query)
+    # gpodder's own Search page documents the OPML API using http://, not https://.
+    # Some deployments appear to reject or mishandle the https variant for anonymous OPML requests.
+    candidates = [
+        ('http://gpodder.net/search.opml?q=' + quoted, {}),
+        ('http://gpodder.net/search.opml?q=' + quoted, {
+            'User-Agent': ('Mozilla/5.0 (X11; Linux x86_64) '
+                           'AppleWebKit/537.36 (KHTML, like Gecko) '
+                           'Chrome/122.0 Safari/537.36'),
+            'Referer': 'https://gpodder.net/search/',
+        }),
+        ('https://gpodder.net/search.opml?q=' + quoted, {
+            'User-Agent': ('Mozilla/5.0 (X11; Linux x86_64) '
+                           'AppleWebKit/537.36 (KHTML, like Gecko) '
+                           'Chrome/122.0 Safari/537.36'),
+            'Referer': 'https://gpodder.net/search/',
+        }),
+    ]
+
+    last_error = 'Search failed.'
+    data = None
+    for url, headers in candidates:
+        resp, errmsg = http_open_stream(url, extra_headers=headers)
+        if errmsg:
+            last_error = errmsg
+            continue
+        try:
+            data = resp.read()
+            break
+        finally:
+            try:
+                resp.close()
+            except Exception:
+                pass
+
+    if data is None:
+        raise IOError(last_error)
+
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError as e:
+        raise ValueError('Search results XML parse error: {}'.format(e))
+
+    results = []
+    seen = set()
+
+    for outline in _iter_opml_outlines(root):
+        xml_url = (outline.get('xmlUrl') or outline.get('xmlurl') or
+                   outline.get('url') or '').strip()
+        if not xml_url or not allowed_remote_url(xml_url):
+            continue
+        if xml_url in seen:
+            continue
+        seen.add(xml_url)
+
+        title = (outline.get('title') or outline.get('text') or
+                 outline.get('name') or 'Untitled Podcast').strip()
+        website = (outline.get('htmlUrl') or outline.get('htmlurl') or
+                   outline.get('website') or '').strip()
+        desc = (outline.get('description') or outline.get('subtitle') or '').strip()
+
+        results.append({
+            'title': title or 'Untitled Podcast',
+            'feed_url': xml_url,
+            'website': website,
+            'description': strip_html(desc),
+        })
+        if limit and len(results) >= limit:
+            break
+
+    return results
+
+
+def _browser_headers(referer=''):
+    headers = {
+        'User-Agent': ('Mozilla/5.0 (X11; Linux x86_64) '
+                       'AppleWebKit/537.36 (KHTML, like Gecko) '
+                       'Chrome/122.0 Safari/537.36'),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    }
+    if referer:
+        headers['Referer'] = referer
+    return headers
+
+
+def _feed_candidate_score(url):
+    """Score likely podcast feed URLs higher than ordinary links."""
+    u = (url or '').lower()
+    score = 0
+    good_bits = (
+        'feeds.megaphone.fm', 'feeds.', 'feed.', '/feed', '.rss', 'rss',
+        'atom', 'feed.xml', 'podcast.rss', 'podcast.xml', 'acast.com',
+        'omnycontent.com', 'captivate.fm', 'simplecast.com', 'buzzsprout.com',
+        'transistor.fm', 'pinecast.com', 'feedburner.com', 'libsyn.com'
+    )
+    for bit in good_bits:
+        if bit in u:
+            score += 1
+    if u.endswith('.xml') or u.endswith('.rss'):
+        score += 2
+    return score
+
+
+def _extract_feed_candidates_from_html(html, base_url):
+    """Extract possible RSS/Atom feed URLs from HTML."""
+    candidates = []
+
+    # Strong signal: <link rel="alternate" type="application/rss+xml" href="...">
+    link_re = re.compile(r'<link\b[^>]*>', re.I)
+    href_re = re.compile(r'href\s*=\s*["\']([^"\']+)["\']', re.I)
+    rel_re = re.compile(r'rel\s*=\s*["\']([^"\']+)["\']', re.I)
+    type_re = re.compile(r'type\s*=\s*["\']([^"\']+)["\']', re.I)
+
+    for tag in link_re.findall(html):
+        href_m = href_re.search(tag)
+        if not href_m:
+            continue
+        href = urllib.parse.urljoin(base_url, href_m.group(1).strip())
+        rel_m = rel_re.search(tag)
+        type_m = type_re.search(tag)
+        rel = rel_m.group(1).lower() if rel_m else ''
+        typ = type_m.group(1).lower() if type_m else ''
+        if 'alternate' in rel and ('rss' in typ or 'atom' in typ or 'xml' in typ):
+            if allowed_remote_url(href):
+                candidates.append(href)
+
+    # Also scan the page for URLs that look feed-like.
+    abs_url_re = re.compile(r'https?://[^\s\'"<>]+', re.I)
+    for raw in abs_url_re.findall(html):
+        candidate = raw.strip()
+        candidate = candidate.rstrip('.,;:)]}>')
+        if allowed_remote_url(candidate) and _feed_candidate_score(candidate) > 0:
+            candidates.append(candidate)
+
+    # Generic href scan for relative feed-like links.
+    for href in href_re.findall(html):
+        abs_href = urllib.parse.urljoin(base_url, href.strip())
+        if allowed_remote_url(abs_href) and _feed_candidate_score(abs_href) > 0:
+            candidates.append(abs_href)
+
+    # Deduplicate while preserving order, then sort strongest candidates first.
+    unique = []
+    seen = set()
+    for item in candidates:
+        if item not in seen:
+            unique.append(item)
+            seen.add(item)
+
+    unique.sort(key=_feed_candidate_score, reverse=True)
+    return unique
+
+
+def _validate_feed_candidate(url):
+    """Check whether a candidate URL parses as a podcast feed."""
+    resp, errmsg = http_open_stream(url, extra_headers=_browser_headers())
+    if errmsg:
+        return False, errmsg
+    try:
+        data = resp.read(524288)
+    finally:
+        try:
+            resp.close()
+        except Exception:
+            pass
+    try:
+        meta, episodes = parse_feed(data, url)
+        if meta.get('title') or episodes:
+            return True, ''
+        return False, 'Parsed but looked empty'
+    except Exception as e:
+        return False, str(e)
+
+
+def discover_feed_from_website(url):
+    """Try to discover a working RSS/Atom feed from a website page."""
+    if not url or not allowed_remote_url(url):
+        return None, 'No website URL available for discovery.'
+
+    resp, errmsg = http_open_stream(url, extra_headers=_browser_headers(referer=url))
+    if errmsg:
+        return None, errmsg
+
+    try:
+        final_url = resp.geturl()
+    except Exception:
+        final_url = url
+
+    try:
+        raw = resp.read(524288)
+    finally:
+        try:
+            resp.close()
+        except Exception:
+            pass
+
+    try:
+        html = raw.decode('utf-8', 'ignore')
+    except Exception:
+        html = str(raw)
+
+    candidates = _extract_feed_candidates_from_html(html, final_url)
+    for candidate in candidates:
+        ok_feed, _why = _validate_feed_candidate(candidate)
+        if ok_feed:
+            return candidate, ''
+
+    return None, 'No working feed discovered from website.'
+
+
+def add_feed_with_recovery(item):
+    """
+    Add a gpodder search result, falling back to website discovery if the
+    listed feed URL is stale or has moved.
+    """
+    if add_feed(item['feed_url']):
+        return True
+
+    website = item.get('website', '')
+    if not website:
+        return False
+
+    info('Trying website feed discovery…')
+    alt_feed, errmsg = discover_feed_from_website(website)
+    if not alt_feed:
+        if errmsg:
+            warn(errmsg)
+        return False
+
+    if alt_feed == item['feed_url']:
+        warn('Discovered feed matches the original failed feed.')
+        return False
+
+    ok('Discovered alternate feed: ' + alt_feed)
+    return add_feed(alt_feed)
+
+
+
+def menu_search_gpodder():
+    """Search gpodder.net for podcasts and add a selected RSS feed."""
+    query = ask('Search gpodder.net for')
+    if not query:
+        return
+
+    while True:
+        sec('Searching gpodder.net')
+        info('Query: ' + query)
+        try:
+            results = search_gpodder(query)
+        except Exception as e:
+            err('Search failed: ' + str(e))
+            pause()
+            return
+
+        if not results:
+            warn('No feeds found for that search.')
+            again = ask('New search (blank to go back)')
+            if not again:
+                return
+            query = again
+            continue
+
+        page = 0
+        page_size = 10
+
+        while True:
+            total_pages = max(1, (len(results) + page_size - 1) // page_size)
+            page = min(page, total_pages - 1)
+            start = page * page_size
+            shown = results[start:start + page_size]
+
+            clrscr()
+            hdr('gpodder.net SEARCH',
+                'query: {}   results:{}   page {}/{}'.format(
+                    trunc(query, 28), len(results), page + 1, total_pages))
+
+            sec('Podcast Results')
+            for idx, item in enumerate(shown, 1):
+                abs_n = start + idx
+                print('  {}{:2d}.{} {}'.format(BD, abs_n, RS, trunc(item['title'], 56)))
+                if item.get('website'):
+                    print('       {}site:{} {}'.format(DM, RS, trunc(item['website'], SCREEN_W - 14)))
+                print('       {}feed:{} {}'.format(DM, RS, trunc(item['feed_url'], SCREEN_W - 14)))
+
+            sec('Commands')
+            print('  Enter number = add that podcast feed')
+            print('  {}V<n>{} View result #n   {}P{}/{}N{} Prev/Next page'.format(
+                  BD, RS, BD, RS, BD, RS))
+            print('  {}S{} New search         {}B{} Back'.format(BD, RS, BD, RS))
+            print()
+
+            ch = ask('Choice').upper()
+
+            if ch in ('B', ''):
+                return
+            elif ch == 'P':
+                if page > 0:
+                    page -= 1
+                else:
+                    warn('Already on first page.')
+                    time.sleep(0.6)
+            elif ch == 'N':
+                if page < total_pages - 1:
+                    page += 1
+                else:
+                    warn('Already on last page.')
+                    time.sleep(0.6)
+            elif ch == 'S':
+                new_query = ask('Search gpodder.net for', default=query)
+                if not new_query:
+                    return
+                query = new_query
+                break
+            elif ch.startswith('V') and ch[1:].isdigit():
+                n = int(ch[1:]) - 1
+                if 0 <= n < len(results):
+                    item = results[n]
+                    clrscr()
+                    hdr(trunc(item['title'], 70), 'gpodder.net result')
+                    print()
+                    print('  {}Feed URL:{} {}'.format(BD, RS, item['feed_url']))
+                    if item.get('website'):
+                        print('  {}Website:{}  {}'.format(BD, RS, item['website']))
+                    if item.get('description'):
+                        sec('Description')
+                        for line in word_wrap(item['description'][:1000], SCREEN_W - 2):
+                            print(DM + line + RS if _COLOUR else line)
+                    sec('Commands')
+                    print('  {}A{} Add this feed   {}B{} Back'.format(BD, RS, BD, RS))
+                    print()
+                    sub = ask('Choice').upper()
+                    if sub == 'A':
+                        if add_feed_with_recovery(item):
+                            pause()
+                            return
+                        pause()
+                else:
+                    warn('No result #{}.'.format(int(ch[1:])))
+                    time.sleep(0.8)
+            elif ch.isdigit():
+                n = int(ch) - 1
+                if 0 <= n < len(results):
+                    if add_feed_with_recovery(results[n]):
+                        pause()
+                        return
+                    pause()
+                else:
+                    warn('No result #{}.'.format(int(ch)))
+                    time.sleep(0.8)
+            elif ch:
+                warn('Unknown command.')
+                time.sleep(0.7)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -858,7 +1260,9 @@ def parse_feed(data_bytes, feed_url):
         return _parse_atom(root, feed_url)
 
     # RSS 1.0 / 2.0
-    channel = root.find('channel') or root
+    channel = root.find('channel')
+    if channel is None:
+        channel = root
     return _parse_rss2(channel, feed_url)
 
 
@@ -888,11 +1292,18 @@ def add_feed(url):
         return False
 
     try:
-        data = resp.read()
+        info('Reading feed XML…')
+        data = read_response_bytes(resp, label='Feed XML')
         resp.close()
     except Exception as e:
+        try:
+            resp.close()
+        except Exception:
+            pass
         err('Read error: ' + str(e))
         return False
+
+    data_hash = sha256_hex(data)
 
     try:
         meta, episodes = parse_feed(data, url)
@@ -912,6 +1323,7 @@ def add_feed(url):
         'image':        meta.get('image', ''),
         'author':       meta.get('author', ''),
         'category':     meta.get('category', ''),
+        'last_feed_hash': data_hash,
         'last_updated': now_iso(),
         'episode_count':len(episodes),
         'new_since_refresh': len(episodes),
@@ -929,13 +1341,21 @@ def add_feed(url):
 
 
 def _fetch_and_parse(feed):
-    """Internal: re-fetch a feed URL. Returns (meta, episodes) or raises."""
+    """Internal: re-fetch a feed URL. Returns (meta, episodes, data_hash) or raises."""
     resp, errmsg = http_get(feed['url'])
     if errmsg:
         raise IOError(errmsg)
-    data = resp.read()
-    resp.close()
-    return parse_feed(data, feed['url'])
+    try:
+        info('Reading feed XML…')
+        data = read_response_bytes(resp, label='Feed XML')
+    finally:
+        try:
+            resp.close()
+        except Exception:
+            pass
+    data_hash = sha256_hex(data)
+    meta, episodes = parse_feed(data, feed['url'])
+    return meta, episodes, data_hash
 
 
 def refresh_feed(fid, silent=False):
@@ -948,11 +1368,19 @@ def refresh_feed(fid, silent=False):
         info('Refreshing: ' + feed['title'])
 
     try:
-        meta, new_eps = _fetch_and_parse(feed)
+        meta, new_eps, data_hash = _fetch_and_parse(feed)
     except Exception as e:
         if not silent:
             err('Refresh failed: ' + str(e))
         return False
+
+    if data_hash == feed.get('last_feed_hash', ''):
+        feed['last_updated'] = now_iso()
+        feed['new_since_refresh'] = 0
+        save_feeds()
+        if not silent:
+            info('Feed unchanged; skipping parse/merge.')
+        return True
 
     existing = load_episodes(fid)
     existing_by_id = {ep['id']: ep for ep in existing}
@@ -979,6 +1407,7 @@ def refresh_feed(fid, silent=False):
     feed.update({
         'title':              meta['title'],
         'description':        meta['description'][:500],
+        'last_feed_hash':     data_hash,
         'last_updated':       now_iso(),
         'episode_count':      len(existing),
         'new_since_refresh':  added,
@@ -1008,8 +1437,9 @@ def refresh_all(silent=False):
         label = trunc(feed['title'], 50)
         if not silent:
             print('  ({}/{}) {}…'.format(idx, len(feeds), label))
-        refresh_feed(feed['id'], silent=silent)
-        total_new += _feeds[feed['id']].get('new_since_refresh', 0)
+        ok_refresh = refresh_feed(feed['id'], silent=silent)
+        if ok_refresh and feed['id'] in _feeds:
+            total_new += _feeds[feed['id']].get('new_since_refresh', 0)
 
     if not silent:
         ok('All feeds refreshed. {} new episode(s) total.'.format(total_new))
@@ -1191,11 +1621,11 @@ def menu_main():
         clrscr()
         feed_list = list(_feeds.values())
 
-        hdr('PODCAST MANAGER  v' + VERSION,
+        hdr('RISCY-PODMAN  v' + VERSION,
             '{} podcast(s)   dl: {}'.format(len(feed_list), cfg('download_dir')))
 
         if not feed_list:
-            print('\n  ' + DM + 'No podcasts yet — press A to add one.' + RS)
+            print('\n  ' + DM + 'No podcasts yet — press A to add one, or G to search gpodder.' + RS)
         else:
             sec('Your Podcasts')
             for idx, fd in enumerate(feed_list, 1):
@@ -1213,16 +1643,18 @@ def menu_main():
                     RS))
 
         sec('Commands')
-        print('  {}A{} Add podcast      {}R{} Refresh all    {}N{} New/unlistened'.format(
+        print('  {}A{} Add podcast      {}G{} Search gpodder  {}R{} Refresh all'.format(
               BD, RS, BD, RS, BD, RS))
-        print('  {}S{} Settings         {}Q{} Quit'.format(BD, RS, BD, RS))
+        print('  {}N{} New/unlistened  {}S{} Settings        {}Q{} Quit'.format(
+              BD, RS, BD, RS, BD, RS))
         if feed_list:
             print('  Enter a number to open that podcast')
         print()
 
-        ch = ask('Choice').upper()
+        ch = ask('Choice').strip()
+        cu = ch.upper()
 
-        if ch == 'Q':
+        if cu == 'Q':
             print('\n  Goodbye!\n')
             sys.exit(0)
         elif ch == 'A':
@@ -1231,6 +1663,8 @@ def menu_main():
             if url:
                 add_feed(url)
                 pause()
+        elif ch == 'G':
+            menu_search_gpodder()
         elif ch == 'R':
             sec('Refreshing All Feeds')
             refresh_all()
@@ -1562,12 +1996,14 @@ def menu_settings():
         timeout  = cfg('http_timeout')
         max_ep   = cfg('max_episodes_per_feed')
         auto_r   = cfg('auto_refresh_on_start')
+        max_feed = cfg('max_feed_mb')
 
         print('  {}1.{} Download folder        : {}'.format(BD, RS, dl_dir))
         print('  {}2.{} Rate-limit delay       : {}s between requests to same host'.format(BD, RS, delay))
         print('  {}3.{} HTTP timeout           : {}s'.format(BD, RS, timeout))
         print('  {}4.{} Max episodes per feed  : {}'.format(BD, RS, max_ep))
         print('  {}5.{} Auto-refresh on start  : {}'.format(BD, RS, 'Yes' if auto_r else 'No'))
+        print('  {}6.{} Max feed XML size      : {} MB'.format(BD, RS, max_feed))
         print()
         print('  Config stored in : ' + _CONFIG_DIR)
         print('  Data  stored in  : ' + _EPISODES_DIR)
@@ -1630,6 +2066,16 @@ def menu_settings():
                 'enabled' if _cfg['auto_refresh_on_start'] else 'disabled'))
             time.sleep(0.8)
 
+        elif ch == '6':
+            val = ask('Max feed XML size in MB', default=str(max_feed))
+            try:
+                _cfg['max_feed_mb'] = max(1, int(val))
+                save_config()
+                ok('Max feed XML size set to {} MB'.format(_cfg['max_feed_mb']))
+            except ValueError:
+                err('Please enter a whole number.')
+            pause()
+
         elif ch:
             warn('Unknown option.')
             time.sleep(0.7)
@@ -1641,7 +2087,7 @@ def menu_settings():
 
 def main():
     clrscr()
-    hdr('PODCAST MANAGER  v' + VERSION,
+    hdr('RISCY-PODMAN  v' + VERSION,
         'Terminal podcast manager for RISC OS & Linux')
     print()
     print('  Platform  : {} {}'.format(
