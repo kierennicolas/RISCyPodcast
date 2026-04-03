@@ -1,6 +1,6 @@
 # Riscy-PodMan
 
-Riscy-PodMan is a terminal podcast manager for RISC OS and Linux.
+Riscy-PodMan is a terminal podcast download manager for RISC OS and Linux.
 
 It is designed to stay simple:
 - standard library only
