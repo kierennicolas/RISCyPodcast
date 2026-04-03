@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+# -*- coding: latin-1 -*-
 """
-╔══════════════════════════════════════════════════════════════════╗
-║              Riscy-PodMan  v1.3                               ║
-║   Terminal podcast manager for RISC OS & Linux                   ║
-║   Standard library only — no pip packages required               ║
-╚══════════════════════════════════════════════════════════════════╝
++------------------------------------------------------------------+
+|              Riscy-PodMan  v1.3                                  |
+|   Terminal podcast manager for RISC OS & Linux                   |
+|   Standard library only - no pip packages required               |
++------------------------------------------------------------------+
 
 Usage:
   python3 riscypodman.py
@@ -29,8 +29,9 @@ import hashlib
 import re
 import shutil
 import socket
+import builtins
 
-# ─── Python 3 guard ───────────────────────────────────────────────────────────
+# --- Python 3 guard -----------------------------------------------------------
 if sys.version_info < (3, 4):
     sys.exit("ERROR: Python 3.4 or later is required.")
 
@@ -46,16 +47,56 @@ try:
 except ImportError:
     _HAS_SSL = False
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 #  PLATFORM DETECTION
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 
 IS_RISCOS = sys.platform.lower().startswith('riscos')
 IS_POSIX  = (os.name == 'posix') and not IS_RISCOS
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def local_name(stem, suffix):
+    """Return a local filename safe for the current platform."""
+    if IS_RISCOS:
+        return '{}-{}'.format(stem, suffix)
+    return '{}.{}'.format(stem, suffix)
+
+
+def _terminal_safe_text(obj):
+    """Convert text to something the current terminal encoding can print."""
+    s = str(obj)
+    replacements = {
+        '\u2026': '...',
+        '\u2014': '-',
+        '\u2013': '-',
+        '\u2192': '->',
+        '\u00a0': ' ',
+    }
+    for src_char, dst_char in replacements.items():
+        s = s.replace(src_char, dst_char)
+
+    encoding = getattr(sys.stdout, 'encoding', None) or 'latin-1'
+    try:
+        s.encode(encoding)
+        return s
+    except Exception:
+        return s.encode(encoding, errors='replace').decode(encoding, errors='replace')
+
+
+def print(*args, **kwargs):
+    """Wrapper around built-in print that sanitises terminal output."""
+    safe_args = tuple(_terminal_safe_text(arg) for arg in args)
+    return builtins.print(*safe_args, **kwargs)
+
+
+def safe_input(prompt=''):
+    """Input wrapper that sanitises the prompt for limited console encodings."""
+    return input(_terminal_safe_text(prompt))
+
+
+
+# --------------------------------------------------------------------------
 #  CONSTANTS
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 
 VERSION              = "1.3"
 APP_NAME             = "RiscyPodMan"
@@ -76,9 +117,9 @@ DEFAULT_MAX_FEED_MB  = 25    # default maximum feed XML size in MB
 USER_AGENT           = ("Riscy-PodMan/{} Python/{}.{}"
                         .format(VERSION, *sys.version_info[:2]))
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 #  ANSI COLOURS  (disabled automatically on RISC OS or non-tty)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 
 def _tty_supports_colour():
     if IS_RISCOS:
@@ -100,9 +141,9 @@ BL  = _c('\033[94m')    # Blue
 MG  = _c('\033[95m')    # Magenta
 CY  = _c('\033[96m')    # Cyan
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 #  PLATFORM-AWARE PATHS
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 
 def _config_dir():
     """
@@ -115,7 +156,7 @@ def _config_dir():
         choices = os.environ.get('Choices$Write', '')
         if choices:
             return os.path.join(choices, APP_NAME)
-        # Fallback — directory called "Config" beside the script
+        # Fallback - directory called "Config" beside the script
         return os.path.join(
             os.path.dirname(os.path.abspath(sys.argv[0])), 'Config')
     else:
@@ -141,15 +182,15 @@ def _default_download_dir():
 
 
 _CONFIG_DIR   = _config_dir()
-_CONFIG_FILE  = os.path.join(_CONFIG_DIR, 'config.json')
-_FEEDS_FILE   = os.path.join(_CONFIG_DIR, 'feeds.json')
+_CONFIG_FILE  = os.path.join(_CONFIG_DIR, local_name('config', 'json'))
+_FEEDS_FILE   = os.path.join(_CONFIG_DIR, local_name('feeds', 'json'))
 _EPISODES_DIR = os.path.join(_CONFIG_DIR, 'episodes')
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 #  FILENAME SANITISATION
-#  RISC OS: '.' = directory separator, '#/*@^?' = wildcards — all replaced.
+#  RISC OS: '.' = directory separator, '#/*@^?' = wildcards - all replaced.
 #  Linux:   '/' replaced; other special chars stripped.
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 
 def safe_name(s, maxlen=80):
     """Return a filesystem-safe name for both RISC OS and Linux."""
@@ -164,9 +205,10 @@ def safe_name(s, maxlen=80):
     s = s.strip('-')
     return (s[:maxlen] or 'untitled')
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# --------------------------------------------------------------------------
 #  SMALL UTILITIES
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 
 def clrscr():
     """Clear the terminal screen (cross-platform)."""
@@ -187,7 +229,7 @@ def sha256_hex(data):
 
 
 def date_display(iso):
-    """'2024-03-15T…' → '15 Mar 2024'."""
+    """'2024-03-15T...' -> '15 Mar 2024'."""
     if not iso:
         return 'Unknown'
     try:
@@ -280,7 +322,7 @@ def sort_key_pub_date(ep):
 
 
 def human_size(n):
-    """bytes → '12.3 MB' etc."""
+    """bytes -> '12.3 MB' etc."""
     if not n or n < 0:
         return '?'
     for unit in ('B', 'KB', 'MB', 'GB'):
@@ -291,7 +333,7 @@ def human_size(n):
 
 
 def human_dur(secs):
-    """seconds → 'H:MM:SS' or 'M:SS'."""
+    """seconds -> 'H:MM:SS' or 'M:SS'."""
     try:
         secs = int(secs)
     except (TypeError, ValueError):
@@ -311,7 +353,7 @@ def trunc(s, n):
 
 
 def dur_to_secs(s):
-    """'HH:MM:SS' or 'MM:SS' or plain seconds → int seconds."""
+    """'HH:MM:SS' or 'MM:SS' or plain seconds -> int seconds."""
     if not s:
         return 0
     s = s.strip()
@@ -361,9 +403,9 @@ def word_wrap(text, width, indent='  '):
             yield line
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 #  PRINT HELPERS
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 
 def hdr(title, sub=''):
     """Print a boxed header."""
@@ -411,7 +453,7 @@ def ask(prompt_text, default=''):
         p += ' [{}]'.format(default)
     p += ': '
     try:
-        val = input(p).strip()
+        val = safe_input(p).strip()
         return val if val else default
     except (EOFError, KeyboardInterrupt):
         print()
@@ -445,9 +487,9 @@ def progress_bar(done, total, width=36):
         bar, pct, human_size(done), human_size(total) if total > 0 else '?')
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 #  CONFIGURATION
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 
 _DEFAULTS = {
     'download_dir':          _default_download_dir(),
@@ -494,20 +536,46 @@ def _ensure_dirs():
 
 def write_json_atomic(path, data):
     """Write JSON atomically where possible."""
+    if IS_RISCOS:
+        # Avoid Unix-style basename/join assumptions on RISC OS paths.
+        if '.' in path:
+            parent, leaf = path.rsplit('.', 1)
+            tmp_path = parent + '.tmp-' + leaf
+        else:
+            tmp_path = path + '-new'
+        with open(tmp_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+        try:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+            shutil.move(tmp_path, path)
+        except Exception:
+            # Final fallback: write directly if rename/move semantics are awkward.
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+        return
+
     directory = os.path.dirname(path) or '.'
     base = os.path.basename(path)
-    tmp_suffix = '-new' if IS_RISCOS else '.tmp'
-    tmp_path = os.path.join(directory, base + tmp_suffix)
+    tmp_path = os.path.join(directory, base + '.tmp')
     with open(tmp_path, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=2)
     os.replace(tmp_path, path)
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 #  FEED & EPISODE STORAGE
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 
-_feeds = {}   # id → feed_dict
+_feeds = {}   # id -> feed_dict
 
 
 def _feed_id(url):
@@ -515,7 +583,7 @@ def _feed_id(url):
 
 
 def _ep_file(feed_id):
-    return os.path.join(_EPISODES_DIR, feed_id + '.json')
+    return os.path.join(_EPISODES_DIR, local_name(feed_id, 'json'))
 
 
 def load_feeds():
@@ -550,11 +618,11 @@ def save_episodes(feed_id, episodes):
     write_json_atomic(_ep_file(feed_id), episodes)
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 #  RATE LIMITER  (per-host, using a simple timestamp dict)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 
-_last_req = {}   # hostname → time.time() of last request
+_last_req = {}   # hostname -> time.time() of last request
 
 
 def _rate_wait(url):
@@ -564,14 +632,14 @@ def _rate_wait(url):
     gap   = time.time() - _last_req.get(host, 0)
     if gap < delay:
         sleep_for = delay - gap
-        info('Rate limit: waiting {:.1f}s for {}…'.format(sleep_for, host))
+        info('Rate limit: waiting {:.1f}s for {}...'.format(sleep_for, host))
         time.sleep(sleep_for)
     _last_req[host] = time.time()
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 #  HTTP GET  (with retry, redirect, 429 handling, rate limiting)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 
 def _build_opener():
     """Build an opener that follows redirects and sets headers."""
@@ -609,7 +677,7 @@ def http_get(url, max_retries=3):
         except urllib.error.HTTPError as e:
             if e.code == 429:
                 retry_after = parse_retry_after(e.headers.get('Retry-After'), 60)
-                warn('HTTP 429 — rate limited by server. Waiting {}s…'.format(retry_after))
+                warn('HTTP 429 - rate limited by server. Waiting {}s...'.format(retry_after))
                 time.sleep(retry_after)
                 continue
             if e.code in (301, 302, 303, 307, 308):
@@ -663,7 +731,7 @@ def http_open_stream(url, max_retries=3, extra_headers=None):
         except urllib.error.HTTPError as e:
             if e.code == 429:
                 retry_after = parse_retry_after(e.headers.get('Retry-After'), 60)
-                warn('HTTP 429 — rate limited by server. Waiting {}s…'.format(retry_after))
+                warn('HTTP 429 - rate limited by server. Waiting {}s...'.format(retry_after))
                 time.sleep(retry_after)
                 continue
             if e.code in (301, 302, 303, 307, 308):
@@ -928,7 +996,7 @@ def add_feed_with_recovery(item):
     if not website:
         return False
 
-    info('Trying website feed discovery…')
+    info('Trying website feed discovery...')
     alt_feed, errmsg = discover_feed_from_website(website)
     if not alt_feed:
         if errmsg:
@@ -1060,9 +1128,9 @@ def menu_search_gpodder():
                 time.sleep(0.7)
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 #  RSS / ATOM PARSING
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 
 # Common namespaces
 _NS = {
@@ -1266,9 +1334,9 @@ def parse_feed(data_bytes, feed_url):
     return _parse_rss2(channel, feed_url)
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 #  FEED OPERATIONS
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 
 def add_feed(url):
     """Fetch + parse a new feed URL and store it. Returns True on success."""
@@ -1292,7 +1360,7 @@ def add_feed(url):
         return False
 
     try:
-        info('Reading feed XML…')
+        info('Reading feed XML...')
         data = read_response_bytes(resp, label='Feed XML')
         resp.close()
     except Exception as e:
@@ -1312,7 +1380,7 @@ def add_feed(url):
         return False
 
     if not episodes:
-        warn('Feed parsed but no audio episodes found — may not be a podcast feed.')
+        warn('Feed parsed but no audio episodes found - may not be a podcast feed.')
 
     feed = {
         'id':           fid,
@@ -1346,7 +1414,7 @@ def _fetch_and_parse(feed):
     if errmsg:
         raise IOError(errmsg)
     try:
-        info('Reading feed XML…')
+        info('Reading feed XML...')
         data = read_response_bytes(resp, label='Feed XML')
     finally:
         try:
@@ -1436,7 +1504,7 @@ def refresh_all(silent=False):
     for idx, feed in enumerate(feeds, 1):
         label = trunc(feed['title'], 50)
         if not silent:
-            print('  ({}/{}) {}…'.format(idx, len(feeds), label))
+            print('  ({}/{}) {}...'.format(idx, len(feeds), label))
         ok_refresh = refresh_feed(feed['id'], silent=silent)
         if ok_refresh and feed['id'] in _feeds:
             total_new += _feeds[feed['id']].get('new_since_refresh', 0)
@@ -1461,20 +1529,29 @@ def remove_feed(fid):
     return False
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 #  EPISODE DOWNLOAD
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 
 def _guess_ext(url, mime):
-    """Return file extension based on URL path or MIME type."""
+    """Return a platform-safe local media suffix based on URL path or MIME type."""
     path_ext = os.path.splitext(urllib.parse.urlparse(url).path)[1].lower()
     if path_ext in ('.mp3', '.ogg', '.m4a', '.opus', '.flac', '.wav', '.aac'):
-        return path_ext
-    mime = (mime or '').lower()
-    if 'ogg' in mime:        return '.ogg'
-    if 'mp4' in mime or 'aac' in mime: return '.m4a'
-    if 'opus' in mime:       return '.opus'
-    return '.mp3'
+        ext = path_ext
+    else:
+        mime = (mime or '').lower()
+        if 'ogg' in mime:
+            ext = '.ogg'
+        elif 'mp4' in mime or 'aac' in mime:
+            ext = '.m4a'
+        elif 'opus' in mime:
+            ext = '.opus'
+        else:
+            ext = '.mp3'
+
+    if IS_RISCOS:
+        return '/' + ext.lstrip('.')
+    return ext
 
 
 def download_episode(fid, ep_id):
@@ -1543,15 +1620,17 @@ def download_episode(fid, ep_id):
                     break
                 f.write(chunk)
                 done += len(chunk)
-                elapsed = max(0.01, time.time() - start)
-                speed   = done / elapsed
-                bar     = progress_bar(done, total)
-                spd_str = human_size(int(speed)) + '/s'
-                line    = '  ' + bar + '  ' + spd_str
-                sys.stdout.write('\r' + line[:SCREEN_W])
-                sys.stdout.flush()
+                if not IS_RISCOS:
+                    elapsed = max(0.01, time.time() - start)
+                    speed   = done / elapsed
+                    bar     = progress_bar(done, total)
+                    spd_str = human_size(int(speed)) + '/s'
+                    line    = '  ' + bar + '  ' + spd_str
+                    sys.stdout.write('\r' + line[:SCREEN_W])
+                    sys.stdout.flush()
 
-        sys.stdout.write('\n')
+        if not IS_RISCOS:
+            sys.stdout.write('\n')
         resp.close()
 
         shutil.move(tmp, dest)
@@ -1563,7 +1642,7 @@ def download_episode(fid, ep_id):
         save_episodes(fid, episodes)
 
         _last_req[urllib.parse.urlparse(ep['url']).netloc] = time.time()
-        ok('Download complete — {}'.format(human_size(done)))
+        ok('Download complete - {}'.format(human_size(done)))
         return True
 
     except KeyboardInterrupt:
@@ -1586,9 +1665,9 @@ def download_episode(fid, ep_id):
                 pass
         return False
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 #  EPISODE MARKING
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 
 def mark_listened(fid, ep_id, state=True):
     episodes = load_episodes(fid)
@@ -1612,9 +1691,9 @@ def mark_all_listened(fid, state=True):
     save_episodes(fid, episodes)
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 #  MENU: FEEDS (main screen)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 
 def menu_main():
     while True:
@@ -1625,7 +1704,7 @@ def menu_main():
             '{} podcast(s)   dl: {}'.format(len(feed_list), cfg('download_dir')))
 
         if not feed_list:
-            print('\n  ' + DM + 'No podcasts yet — press A to add one, or G to search gpodder.' + RS)
+            print('\n  ' + DM + 'No podcasts yet - press A to add one, or G to search gpodder.' + RS)
         else:
             sec('Your Podcasts')
             for idx, fd in enumerate(feed_list, 1):
@@ -1685,9 +1764,9 @@ def menu_main():
             time.sleep(0.8)
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 #  MENU: EPISODE LIST (for one feed)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 
 PAGE_SIZE = 10
 
@@ -1788,7 +1867,7 @@ def menu_episodes(fid):
                 info('Nothing to download.')
                 pause()
             else:
-                info('Downloading {} episode(s)…'.format(len(to_dl)))
+                info('Downloading {} episode(s)...'.format(len(to_dl)))
                 for ep in to_dl:
                     download_episode(fid, ep['id'])
                 pause()
@@ -1833,9 +1912,9 @@ def menu_episodes(fid):
             time.sleep(0.7)
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 #  MENU: EPISODE DETAIL
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 
 def menu_episode_detail(fid, ep_id):
     while True:
@@ -1898,9 +1977,9 @@ def menu_episode_detail(fid, ep_id):
             time.sleep(0.7)
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 #  MENU: NEW / UNLISTENED EPISODES (across all feeds)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 
 def menu_new_episodes():
     while True:
@@ -1932,7 +2011,7 @@ def menu_new_episodes():
                   BD, i, RS, dl, title, DM, ftit, date, RS))
 
         if len(all_new) > 20:
-            print('  ' + DM + '… and {} more (open individual podcasts to see all)'.format(
+            print('  ' + DM + '... and {} more (open individual podcasts to see all)'.format(
                   len(all_new) - 20) + RS)
 
         sec('Commands')
@@ -1981,9 +2060,9 @@ def menu_new_episodes():
             time.sleep(0.7)
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 #  MENU: SETTINGS
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 
 def menu_settings():
     while True:
@@ -2081,9 +2160,9 @@ def menu_settings():
             time.sleep(0.7)
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 #  ENTRY POINT
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# --------------------------------------------------------------------------
 
 def main():
     clrscr()
@@ -2092,12 +2171,12 @@ def main():
     print()
     print('  Platform  : {} {}'.format(
         'RISC OS' if IS_RISCOS else 'Linux/POSIX',
-        '(no SSL — only http:// feeds)' if not _HAS_SSL else ''))
+        '(no SSL - only http:// feeds)' if not _HAS_SSL else ''))
     print('  Config    : ' + _CONFIG_DIR)
     print('  Python    : {}.{}.{}'.format(*sys.version_info[:3]))
 
     # Initialise storage
-    info('Loading config…')
+    info('Loading config...')
     load_config()
     load_feeds()
     _ensure_dirs()
@@ -2113,7 +2192,7 @@ def main():
     # Auto-refresh
     if cfg('auto_refresh_on_start') and _feeds:
         print()
-        info('Auto-refreshing all feeds…')
+        info('Auto-refreshing all feeds...')
         refresh_all()
         pause()
 
