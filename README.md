@@ -13,6 +13,8 @@ It is designed to stay simple:
 
 Current script version: **v1.3**
 
+Tested on Titanium and Pinebook Pro for RISCOS, running 5.30, and Ubuntu 24.04 LTS. 
+
 ## Features
 
 - Add podcast feeds manually with an RSS or Atom URL
